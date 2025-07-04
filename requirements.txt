@@ -1,0 +1,6 @@
+# requirements.txt
+fastapi
+uvicorn
+google-generativeai
+pydantic
+python-dotenv
