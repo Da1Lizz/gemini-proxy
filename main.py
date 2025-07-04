@@ -3,6 +3,7 @@ import os
 import google.generativeai as genai
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware # <--- IMPORT THE NEW MODULE
 from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 
@@ -16,15 +17,12 @@ except KeyError:
     raise RuntimeError("GOOGLE_API_KEY environment variable not set!")
 
 # --- Pydantic Models (to mimic OpenAI's structure) ---
-# These models define the expected request and response formats.
-# Janitor.ai sends requests in this format.
-
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "gemini-1.5-pro-latest" # The model name is passed but we'll use our own
+    model: str
     messages: List[ChatMessage]
     temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = 1024
@@ -44,18 +42,27 @@ class ChatCompletionResponse(BaseModel):
 # --- FastAPI Application ---
 app = FastAPI()
 
+# --- NEW: CORS (Cross-Origin Resource Sharing) Middleware ---
+# This is the crucial part that allows Janitor.ai to talk to your proxy.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
+# -------------------------------------------------------------
+
 # --- The Core Proxy Endpoint ---
-# This is where Janitor.ai will send its requests.
-@app.post("/v1/chat/completions")
+# This path is based on Janitor.ai's "Proxy" tab setting
+@app.post("/")
 async def chat_completions(request: ChatCompletionRequest):
     """
     The main endpoint that mimics OpenAI's chat completions API.
+    Janitor AI's "Proxy" tab sends requests to the root path.
     """
-    # --- Model and Safety Configuration ---
-    # NOTE: You can change the model name here if you want to use a different one
     model_name = request.model
     
-    # CRITICAL: This disables all safety filters.
     safety_settings = {
         "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
         "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -68,47 +75,36 @@ async def chat_completions(request: ChatCompletionRequest):
         "max_output_tokens": request.max_tokens,
     }
     
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        generation_config=generation_config,
-        safety_settings=safety_settings
-    )
-
-    # --- Message Translation ---
-    # Gemini requires a specific format. We convert the OpenAI-style
-    # messages into what Gemini expects.
-    gemini_messages = []
-    system_instruction = None
-
-    for msg in request.messages:
-        # Gemini 1.5 Pro has a dedicated 'system' instruction
-        if msg.role == "system":
-            system_instruction = msg.content
-            continue
-        # Gemini uses 'model' for the 'assistant' role
-        role = "model" if msg.role == "assistant" else "user"
-        gemini_messages.append({"role": role, "parts": [msg.content]})
-
     try:
-        # --- Calling the Gemini API ---
-        chat_session = model.start_chat(
-            history=gemini_messages
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=generation_config,
+            safety_settings=safety_settings
         )
-        
-        # We need to find the last user message to send to Gemini
-        last_user_message = "..." # Default message if no user message found
-        if gemini_messages and gemini_messages[-1]['role'] == 'user':
-            last_user_message = gemini_messages.pop()['parts'][0] # Get content of last user message
 
-        # Add system instruction to the model if it exists
-        # This is a bit of a workaround to apply the system prompt effectively
+        gemini_messages = []
+        system_instruction = None
+
+        for msg in request.messages:
+            if msg.role == "system":
+                system_instruction = msg.content
+                continue
+            role = "model" if msg.role == "assistant" else "user"
+            gemini_messages.append({"role": role, "parts": [msg.content]})
+
+        # We need the last user message to send to Gemini
+        last_user_message = "..."
+        if gemini_messages and gemini_messages[-1]['role'] == 'user':
+            last_user_message = gemini_messages.pop()['parts'][0]
+
+        chat_session = model.start_chat(history=gemini_messages)
+        
+        full_prompt = last_user_message
         if system_instruction:
             full_prompt = f"{system_instruction}\n\n{last_user_message}"
-            response = chat_session.send_message(full_prompt)
-        else:
-            response = chat_session.send_message(last_user_message)
+        
+        response = chat_session.send_message(full_prompt)
 
-        # --- Formatting the Response for Janitor.ai ---
         response_message = ChatMessage(role="assistant", content=response.text)
         response_choice = ChatChoice(message=response_message)
         
@@ -119,10 +115,39 @@ async def chat_completions(request: ChatCompletionRequest):
 
     except Exception as e:
         print(f"An error occurred: {e}")
-        # In case of an error with the Gemini API, return a server error
+        # This makes the error visible in the Render logs
         raise HTTPException(status_code=500, detail=str(e))
 
 # Health check endpoint for Render
 @app.get("/")
 def health_check():
     return {"status": "ok"}
+```***Note:*** *I also changed the endpoint from `/v1/chat/completions` to just `/` to better match the URL structure Janitor now uses in its "Proxy" tab. This makes our proxy more robust.*
+
+---
+
+#### **Part 2: Re-deploy the Final Code**
+
+1.  Save the updated `main.py` file.
+2.  Go to your **Git Bash** terminal.
+3.  Run these commands to upload the fix:
+
+    ```bash
+    git add main.py
+    git commit -m "Fix CORS and update endpoint path"
+    git push origin main
+    ```
+
+---
+
+#### **Part 3: Final Check**
+
+1.  Wait for Render to finish deploying your update (the status will change to "Deploying" and then back to "Live").
+2.  Go back to your Janitor.ai settings. The configuration you had in your last screenshot is **perfect**. Do not change it.
+    *   **Proxy Tab**
+    *   Model: `gemini-2.5-pro` (or `gemini-1.5-pro-latest` if you prefer)
+    *   URL: `https://da1lizz-gemini-proxy.onrender.com`
+    *   API Key: Any random text.
+3.  Click **"Check API Key/Model"**.
+
+It should now work. Congratulations in advance
