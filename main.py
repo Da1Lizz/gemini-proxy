@@ -2,7 +2,8 @@
 import os
 import json
 import vertexai
-from vertexai.generative_models import GenerativeModel, Part, GenerationConfig, SafetySetting, HarmCategory
+# The new, correct imports
+from vertexai.generative_models import GenerativeModel, Part, Content, GenerationConfig, SafetySetting, HarmCategory
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -14,7 +15,8 @@ try:
     gcp_creds_base64 = os.environ['GCP_SA_KEY_BASE64']
     gcp_creds_json = base64.b64decode(gcp_creds_base64).decode('utf-8')
     gcp_creds_dict = json.loads(gcp_creds_json)
-    vertexai.init(project=gcp_creds_dict['project_id'], credentials=gcp_creds_dict)
+    # Initialize Vertex AI with the project ID and credentials
+    vertexai.init(project=gcp_creds_dict.get('project_id'), credentials=gcp_creds_dict)
 except KeyError:
     raise RuntimeError("GCP_SA_KEY_BASE64 environment variable not set!")
 except Exception as e:
@@ -58,13 +60,15 @@ app.add_middleware(
 @app.post("/")
 async def chat_completions(request: ChatCompletionRequest):
     model_name = request.model
+    # Translate model names to Vertex AI format
     if "gemini-1.5-pro" in model_name:
         model_name = "gemini-1.5-pro-001"
     elif "gemini-1.5-flash" in model_name:
         model_name = "gemini-1.5-flash-001"
     elif "gemini-2.5-pro" in model_name: # Future-proofing
-        model_name = "gemini-2.5-pro-001" 
+        model_name = "gemini-2.5-pro-001"
 
+    # Effective safety filter override for Vertex AI
     safety_settings = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: SafetySetting.HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: SafetySetting.HarmBlockThreshold.BLOCK_NONE,
@@ -78,8 +82,8 @@ async def chat_completions(request: ChatCompletionRequest):
     )
 
     try:
-        # --- THIS IS THE CORRECTED MESSAGE FORMATTING ---
-        vertex_history = []
+        # --- THE 100% CORRECTED MESSAGE FORMATTING ---
+        contents = []
         system_instruction = None
         for msg in request.messages:
             if msg.role == "system":
@@ -87,11 +91,9 @@ async def chat_completions(request: ChatCompletionRequest):
                 continue
             
             role = "model" if msg.role == "assistant" else "user"
-            # The role is OUTSIDE the part, as required by the library
-            vertex_history.append(
-                {"role": role, "parts": [Part.from_text(msg.content)]}
-            )
-        # --------------------------------------------------
+            # Create a proper 'Content' object as required by the library
+            contents.append(Content(role=role, parts=[Part.from_text(msg.content)]))
+        # ---------------------------------------------
 
         model = GenerativeModel(
             model_name,
@@ -99,12 +101,17 @@ async def chat_completions(request: ChatCompletionRequest):
         )
 
         response = await model.generate_content_async(
-            vertex_history, # Pass the correctly formatted history
+            contents, # Pass the list of Content objects
             generation_config=generation_config,
-            safety_settings=safety_settings
+            safety_settings=safety_settings,
         )
         
-        response_text = response.candidates[0].content.parts[0].text
+        # Check for safety blocks even with Vertex, just in case
+        if not response.candidates or not response.candidates[0].content.parts:
+            response_text = "[Response was fully blocked by Google Vertex AI's non-negotiable safety filters. This can happen in extreme cases. Please adjust the prompt.]"
+        else:
+            response_text = response.candidates[0].content.parts[0].text
+
         response_message = ChatMessage(role="assistant", content=response_text)
         response_choice = ChatChoice(message=response_message)
         
