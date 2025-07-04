@@ -53,7 +53,7 @@ async def chat_completions(request: ChatCompletionRequest):
     """
     # --- Model and Safety Configuration ---
     # NOTE: You can change the model name here if you want to use a different one
-    model_name = "gemini-1.5-pro-latest"
+    model_name = request.model
     
     # CRITICAL: This disables all safety filters.
     safety_settings = {
